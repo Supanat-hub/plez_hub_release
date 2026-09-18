@@ -40,10 +40,26 @@ local function execute()
         return
     end
 
+    -- Clean up any existing old GUI instances from previous runs
+    pcall(function()
+        if _G.PSD then
+            if _G.PSD.GlobalMaid then _G.PSD.GlobalMaid:DoCleaning() end
+            if _G.PSD.Window and _G.PSD.Window.Gui then _G.PSD.Window.Gui:Destroy() end
+            _G.PSD = nil
+        end
+        local cg = game:GetService("CoreGui")
+        if cg and cg:FindFirstChild("PlezUI") then cg.PlezUI:Destroy() end
+        local lp = game:GetService("Players").LocalPlayer
+        if lp and lp:FindFirstChild("PlayerGui") and lp.PlayerGui:FindFirstChild("PlezUI") then
+            lp.PlayerGui.PlezUI:Destroy()
+        end
+    end)
+
     notifyUser("PSD Hub", "Loading latest release from GitHub...")
 
-    -- Cache busting parameter (?t=timestamp) ensures users always get latest updates
-    local requestUrl = SCRIPT_URL .. "?t=" .. tostring(os.time())
+    -- Cache busting parameter ensures users always get the freshest build
+    local uniqueToken = tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999))
+    local requestUrl = SCRIPT_URL .. "?t=" .. uniqueToken
     local success, scriptContent = pcall(function()
         return game:HttpGet(requestUrl)
     end)
