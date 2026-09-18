@@ -65,6 +65,17 @@ local function notifyUser(title, text)
 end
 
 local function execute()
+    -- Ensure game and LocalPlayer are fully loaded before downloading or running
+    if not game:IsLoaded() then
+        print("[PSD Hub] Waiting for game to finish loading...")
+        game.Loaded:Wait()
+    end
+
+    local Players = game:GetService("Players")
+    while not Players.LocalPlayer do
+        task.wait(0.1)
+    end
+
     printBanner()
 
     if not game.HttpGet then
