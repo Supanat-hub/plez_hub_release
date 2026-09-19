@@ -1,6 +1,6 @@
 --[[
     PSD Hub — Egg & Mutation Structure Diagnostic Scanner
-    Scans live egg instances in workspace, player plots, and ReplicatedStorage
+    Scans live egg instances in workspace, player plots, and ReplicatedStorage.GameData
     to discover the exact attributes, tags, effects, and naming conventions used
     for standard and mutated eggs in Ride a Pet.
 
@@ -53,7 +53,10 @@ local function copyToClipboard(text)
     return false
 end
 
-local function serializeValue(val)
+local function serializeValue(val, depth)
+    depth = depth or 0
+    if depth > 5 then return "..." end
+
     local t = typeof(val)
     if t == "Color3" then
         return string.format("RGB(%d, %d, %d)", math.floor(val.R * 255), math.floor(val.G * 255), math.floor(val.B * 255))
@@ -66,7 +69,7 @@ local function serializeValue(val)
     elseif t == "table" then
         local safe = {}
         for k, v in pairs(val) do
-            safe[tostring(k)] = serializeValue(v)
+            safe[tostring(k)] = serializeValue(v, depth + 1)
         end
         return safe
     elseif t == "string" or t == "number" or t == "boolean" then
@@ -91,7 +94,8 @@ local function inspectEggInstance(egg)
         Guis = {},
         ValueObjects = {},
         PartsCount = 0,
-        HasHighlight = false,
+        HasMutationHitbox = false,
+        MutationAttribute = nil,
         SuspiciousKeywords = {},
         IsPotentiallyMutated = false,
     }
@@ -101,6 +105,9 @@ local function inspectEggInstance(egg)
     if okAttr and attrs then
         for k, v in pairs(attrs) do
             data.Attributes[k] = serializeValue(v)
+            if tostring(k):lower() == "mutation" then
+                data.MutationAttribute = tostring(v)
+            end
         end
     end
 
@@ -110,7 +117,7 @@ local function inspectEggInstance(egg)
     end)
 
     -- 3. Check for mutation keywords in Name
-    local keywords = {"eternal", "void", "rage", "volted", "volt", "shocked", "shock", "thunder", "lightning", "mutated", "mutation", "100x", "10x", "4x", "3x", "2x"}
+    local keywords = {"eternal", "void", "rage", "volted", "volt", "shocked", "shock", "thunder", "lightning", "mutated", "mutation"}
     local lowerName = egg.Name:lower()
     for _, kw in ipairs(keywords) do
         if lowerName:find(kw) then
@@ -124,17 +131,23 @@ local function inspectEggInstance(egg)
         local dName = desc.Name
         local dLower = dName:lower()
 
-        -- Check descendant names for keywords
-        for _, kw in ipairs(keywords) do
-            if dLower:find(kw) then
-                table.insert(data.SuspiciousKeywords, string.format("%s(%s):%s", dClass, dName, kw))
+        if dName == "MutationHitbox" then
+            data.HasMutationHitbox = true
+            table.insert(data.SuspiciousKeywords, "Part(MutationHitbox)")
+        end
+
+        -- Check particle and beam names for mutation effects
+        if desc:IsA("ParticleEmitter") or desc:IsA("Beam") then
+            for _, kw in ipairs({"lightning", "shock", "volt", "void", "rage", "eternal", "mutation"}) do
+                if dLower:find(kw) then
+                    table.insert(data.SuspiciousKeywords, string.format("%s(%s):%s", dClass, dName, kw))
+                end
             end
         end
 
         if desc:IsA("BasePart") then
             data.PartsCount = data.PartsCount + 1
         elseif desc:IsA("Highlight") then
-            data.HasHighlight = true
             table.insert(data.VisualEffects, {
                 Type = "Highlight",
                 Name = dName,
@@ -208,12 +221,15 @@ local function inspectEggInstance(egg)
         end
     end
 
-    -- Flags if this egg looks special or mutated
-    data.IsPotentiallyMutated = (#data.SuspiciousKeywords > 0)
-        or (next(data.Attributes) ~= nil)
-        or (#data.Tags > 0)
-        or data.HasHighlight
-        or (#data.VisualEffects > 0)
+    -- Accurately determine mutation:
+    -- Standard eggs have EggOutline (Highlight) and EggGlow (PointLight).
+    -- Mutated eggs have:
+    -- 1. Mutation attribute
+    -- 2. MutationHitbox child
+    -- 3. Mutation-specific particles / name keywords
+    data.IsPotentiallyMutated = (data.MutationAttribute ~= nil)
+        or data.HasMutationHitbox
+        or (#data.SuspiciousKeywords > 0)
 
     return data
 end
@@ -264,42 +280,29 @@ local function scanWeatherEnvironment()
     return env
 end
 
--- Scans ReplicatedStorage for Modules that might contain Egg or Pet metadata (Metadata only, NO blind require)
-local function scanReplicatedStorageMetadata()
-    local moduleDumps = {}
-    local keywords = {"egg", "pet", "mutation", "weather", "config", "data", "hatch", "drop"}
+-- Safely inspects and dumps ReplicatedStorage.GameData tables (Mutations, Weather, Eggs, HatchLuck)
+local function dumpGameDataModules()
+    local results = {}
+    local gameData = ReplicatedStorage:FindFirstChild("GameData")
+    if not gameData then
+        return results
+    end
 
-    pcall(function()
-        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
-            if desc:IsA("ModuleScript") then
-                local lowerName = desc.Name:lower()
-                local matches = false
-                for _, kw in ipairs(keywords) do
-                    if lowerName:find(kw) then
-                        matches = true
-                        break
-                    end
-                end
-
-                if matches then
-                    local modAttrs = {}
-                    pcall(function()
-                        for k, v in pairs(desc:GetAttributes()) do
-                            modAttrs[k] = serializeValue(v)
-                        end
-                    end)
-
-                    table.insert(moduleDumps, {
-                        FullName = desc:GetFullName(),
-                        Name = desc.Name,
-                        Attributes = modAttrs,
-                    })
-                end
+    for _, mod in ipairs(gameData:GetChildren()) do
+        if mod:IsA("ModuleScript") then
+            local okReq, res = pcall(function()
+                return require(mod)
+            end)
+            if okReq and type(res) == "table" then
+                results[mod.Name] = serializeValue(res)
+                log(string.format("  -> Successfully dumped ReplicatedStorage.GameData.%s", mod.Name))
+            else
+                log(string.format("  -> Could not require GameData.%s (skipped)", mod.Name), true)
             end
         end
-    end)
+    end
 
-    return moduleDumps
+    return results
 end
 
 -- Main diagnostic scan execution
@@ -316,8 +319,8 @@ function Scanner:Run(options)
         Timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         PlaceId = game.PlaceId,
         GameJobId = game.JobId,
+        GameData = {},
         Weather = {},
-        Modules = {},
         RenderedEggsSummary = {
             TotalEggs = 0,
             UniqueNames = {},
@@ -328,7 +331,7 @@ function Scanner:Run(options)
         OtherEggContainers = {},
     }
 
-    -- STEP 1: Scan workspace.RenderedEggs (FIRST AND FOREMOST)
+    -- STEP 1: Scan workspace.RenderedEggs (Wild eggs)
     log("[Step 1/4] Scanning workspace.RenderedEggs...")
     local renderedFolder = workspace:FindFirstChild("RenderedEggs")
     if renderedFolder then
@@ -342,14 +345,10 @@ function Scanner:Run(options)
         end
         report.RenderedEggsSummary.UniqueNames = nameCount
 
-        -- Print unique egg names
         for eggName, count in pairs(nameCount) do
             log(string.format("     • %s: %d active", eggName, count))
         end
 
-        -- Store detailed inspection for:
-        -- - ALL eggs marked as potentially mutated
-        -- - 1 sample of each standard egg type
         local samplesSaved = {}
         for _, egg in ipairs(children) do
             local inspected = inspectEggInstance(egg)
@@ -357,16 +356,11 @@ function Scanner:Run(options)
                 if inspected.IsPotentiallyMutated then
                     report.RenderedEggsSummary.MutatedCount = report.RenderedEggsSummary.MutatedCount + 1
                     table.insert(report.DetailedEggs, inspected)
-                    log(string.format("⚡ [MUTATED/SPECIAL] %s", egg.Name), true)
-                    if next(inspected.Attributes) ~= nil then
-                        log(string.format("     Attributes: %s", HttpService:JSONEncode(inspected.Attributes)), true)
-                    end
-                    if #inspected.Tags > 0 then
-                        log(string.format("     Tags: %s", table.concat(inspected.Tags, ", ")), true)
-                    end
-                    if #inspected.VisualEffects > 0 then
-                        log(string.format("     Effects: %d visual effects found", #inspected.VisualEffects), true)
-                    end
+                    log(string.format("⚡ [MUTATED IN WILD] %s (Mutation: %s, Hitbox: %s)",
+                        egg.Name,
+                        tostring(inspected.MutationAttribute or "None"),
+                        tostring(inspected.HasMutationHitbox)
+                    ), true)
                 elseif not samplesSaved[egg.Name] then
                     samplesSaved[egg.Name] = true
                     table.insert(report.DetailedEggs, inspected)
@@ -377,7 +371,7 @@ function Scanner:Run(options)
         log("⚠️ workspace.RenderedEggs not found! Searching for fallback egg containers...", true)
         for _, obj in ipairs(workspace:GetChildren()) do
             local lower = obj.Name:lower()
-            if (lower:find("egg") or lower:find("render")) and obj:IsA("Folder") or obj:IsA("Model") then
+            if (lower:find("egg") or lower:find("render")) and (obj:IsA("Folder") or obj:IsA("Model")) then
                 table.insert(report.OtherEggContainers, obj:GetFullName())
                 log(string.format("  -> Discovered container: %s (%d items)", obj.Name, #obj:GetChildren()))
             end
@@ -397,6 +391,13 @@ function Scanner:Run(options)
                         if inspected then
                             inspected.PlotOwner = plot.Name
                             table.insert(report.PlayerPlotEggs, inspected)
+                            if inspected.IsPotentiallyMutated then
+                                log(string.format("  ⚡ Found Base Mutated Egg: %s (Mutation: %s, Owner: %s)",
+                                    egg.Name,
+                                    tostring(inspected.MutationAttribute),
+                                    tostring(inspected.PlotOwner)
+                                ))
+                            end
                         end
                     end
                 end
@@ -409,29 +410,20 @@ function Scanner:Run(options)
     log("[Step 3/4] Scanning Weather & Environment...")
     pcall(function()
         report.Weather = scanWeatherEnvironment()
-        for k, v in pairs(report.Weather.WorkspaceAttributes) do
-            log(string.format("  workspace[%s] = %s", tostring(k), tostring(v)))
-        end
-        for k, v in pairs(report.Weather.LightingAttributes) do
-            log(string.format("  Lighting[%s] = %s", tostring(k), tostring(v)))
-        end
     end)
 
-    -- STEP 4: Scan ReplicatedStorage Modules Metadata
-    log("[Step 4/4] Scanning ReplicatedStorage module metadata...")
+    -- STEP 4: Dump ReplicatedStorage.GameData Modules (Mutations, Weather, Eggs, HatchLuck)
+    log("[Step 4/4] Reading ReplicatedStorage.GameData modules...")
     pcall(function()
-        report.Modules = scanReplicatedStorageMetadata()
-        log(string.format("  -> Found %d relevant modules in ReplicatedStorage", #report.Modules))
-        for _, mod in ipairs(report.Modules) do
-            log(string.format("     • %s (%s)", mod.Name, mod.FullName))
-        end
+        report.GameData = dumpGameDataModules()
     end)
 
     -- STEP 5: Serialize and Export
     log("==================================================")
-    log(string.format("✅ Scan Finished! Total Rendered Eggs: %d | Mutated/Special: %d",
+    log(string.format("✅ Scan Finished! Total Rendered Eggs: %d | Mutated Wild: %d | Base Eggs: %d",
         report.RenderedEggsSummary.TotalEggs,
-        report.RenderedEggsSummary.MutatedCount
+        report.RenderedEggsSummary.MutatedCount,
+        #report.PlayerPlotEggs
     ))
     log("==================================================")
 
@@ -443,9 +435,8 @@ function Scanner:Run(options)
     if okJson and encoded then
         jsonString = encoded
     else
-        -- Fallback simpler serialization
-        log("⚠️ Standard JSON encode failed, generating clean report string...", true)
-        jsonString = serializeValue(report)
+        log("⚠️ Standard JSON encode failed, using serialized table...", true)
+        jsonString = HttpService:JSONEncode(serializeValue(report))
     end
 
     if jsonString then
@@ -465,12 +456,10 @@ function Scanner:Run(options)
             local copied = copyToClipboard(jsonString)
             if copied then
                 log("📋 Dump copied to system clipboard! Press Ctrl+V to paste.")
-            else
-                log("⚠️ setclipboard() not supported by your executor.", true)
             end
         end
 
-        notifyUser("Egg Scanner", string.format("Scan complete! %d eggs scanned (%d mutated). Copied to clipboard!", report.RenderedEggsSummary.TotalEggs, report.RenderedEggsSummary.MutatedCount))
+        notifyUser("Egg Scanner", string.format("Scan complete! %d eggs scanned. Copied to clipboard!", report.RenderedEggsSummary.TotalEggs))
     end
 
     return report
@@ -490,20 +479,17 @@ function Scanner:StartWatcher()
         task.wait(0.2)
         local inspected = inspectEggInstance(child)
         if inspected and inspected.IsPotentiallyMutated then
-            log(string.format("⚡ [LIVE DETECTED] %s spawned with special traits!", child.Name), true)
-            if next(inspected.Attributes) ~= nil then
-                log(string.format("   Attributes: %s", HttpService:JSONEncode(inspected.Attributes)), true)
-            end
-            if #inspected.Tags > 0 then
-                log(string.format("   Tags: %s", table.concat(inspected.Tags, ", ")), true)
-            end
+            log(string.format("⚡ [LIVE DETECTED] %s spawned with Mutation: %s!",
+                child.Name,
+                tostring(inspected.MutationAttribute or "VisualEffect")
+            ), true)
         end
     end)
 
     local descConn = renderedFolder.DescendantAdded:Connect(function(desc)
-        if desc:IsA("ParticleEmitter") or desc:IsA("Highlight") or desc:IsA("Beam") then
+        if desc.Name == "MutationHitbox" or desc.Name:lower():find("lightning") then
             local egg = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
-            log(string.format("✨ [EFFECT ADDED] Effect '%s' added to egg: %s", desc.Name, egg and egg.Name or "Unknown"))
+            log(string.format("✨ [MUTATION STRUCK] %s struck on egg: %s", desc.Name, egg and egg.Name or "Unknown"), true)
         end
     end)
 
