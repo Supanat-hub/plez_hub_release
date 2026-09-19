@@ -1,6 +1,6 @@
 --[[
     PSD Hub — Egg & Mutation Structure Diagnostic Scanner
-    Scans live egg instances in workspace, player plots, and ReplicatedStorage modules
+    Scans live egg instances in workspace, player plots, and ReplicatedStorage
     to discover the exact attributes, tags, effects, and naming conventions used
     for standard and mutated eggs in Ride a Pet.
 
@@ -63,7 +63,13 @@ local function serializeValue(val)
         return string.format("Pos(%.1f, %.1f, %.1f)", val.Position.X, val.Position.Y, val.Position.Z)
     elseif t == "Instance" then
         return val:GetFullName()
-    elseif t == "table" or t == "string" or t == "number" or t == "boolean" then
+    elseif t == "table" then
+        local safe = {}
+        for k, v in pairs(val) do
+            safe[tostring(k)] = serializeValue(v)
+        end
+        return safe
+    elseif t == "string" or t == "number" or t == "boolean" then
         return val
     else
         return tostring(val)
@@ -87,6 +93,7 @@ local function inspectEggInstance(egg)
         PartsCount = 0,
         HasHighlight = false,
         SuspiciousKeywords = {},
+        IsPotentiallyMutated = false,
     }
 
     -- 1. Attributes
@@ -211,86 +218,88 @@ local function inspectEggInstance(egg)
     return data
 end
 
--- Scans ReplicatedStorage for Modules that might contain Egg, Pet, or Mutation tables
-local function scanReplicatedStorage()
-    local moduleDumps = {}
-    local keywords = {"egg", "pet", "mutation", "weather", "config", "data", "hatch", "drop"}
-
-    for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
-        if desc:IsA("ModuleScript") then
-            local lowerName = desc.Name:lower()
-            local matches = false
-            for _, kw in ipairs(keywords) do
-                if lowerName:find(kw) then
-                    matches = true
-                    break
-                end
-            end
-
-            if matches then
-                local modInfo = {
-                    FullName = desc:GetFullName(),
-                    Name = desc.Name,
-                    Attributes = desc:GetAttributes(),
-                    RequireSuccessful = false,
-                    ExportedKeys = {},
-                    SampleData = nil,
-                }
-
-                -- Try requiring the module
-                local okReq, result = pcall(function()
-                    return require(desc)
-                end)
-
-                if okReq and type(result) == "table" then
-                    modInfo.RequireSuccessful = true
-                    local keys = {}
-                    for k, v in pairs(result) do
-                        table.insert(keys, tostring(k))
-                    end
-                    modInfo.ExportedKeys = keys
-
-                    -- If small table, include representation
-                    local okJson, json = pcall(function()
-                        return HttpService:JSONEncode(result)
-                    end)
-                    if okJson and #json < 4000 then
-                        modInfo.SampleData = result
-                    end
-                end
-
-                table.insert(moduleDumps, modInfo)
-            end
-        end
-    end
-
-    return moduleDumps
-end
-
 -- Checks global weather environment
 local function scanWeatherEnvironment()
     local env = {
-        WorkspaceAttributes = workspace:GetAttributes(),
-        LightingAttributes = Lighting:GetAttributes(),
-        ReplicatedStorageAttributes = ReplicatedStorage:GetAttributes(),
+        WorkspaceAttributes = {},
+        LightingAttributes = {},
+        ReplicatedStorageAttributes = {},
         WeatherObjects = {},
     }
 
-    for _, root in ipairs({workspace, Lighting, ReplicatedStorage}) do
-        for _, child in ipairs(root:GetChildren()) do
-            local lName = child.Name:lower()
-            if lName:find("weather") or lName:find("event") or lName:find("storm") or lName:find("lighting") then
-                table.insert(env.WeatherObjects, {
-                    Path = child:GetFullName(),
-                    ClassName = child.ClassName,
-                    Attributes = child:GetAttributes(),
-                    Value = child:IsA("ValueBase") and tostring(child.Value) or nil,
-                })
+    pcall(function()
+        for k, v in pairs(workspace:GetAttributes()) do
+            env.WorkspaceAttributes[k] = serializeValue(v)
+        end
+    end)
+
+    pcall(function()
+        for k, v in pairs(Lighting:GetAttributes()) do
+            env.LightingAttributes[k] = serializeValue(v)
+        end
+    end)
+
+    pcall(function()
+        for k, v in pairs(ReplicatedStorage:GetAttributes()) do
+            env.ReplicatedStorageAttributes[k] = serializeValue(v)
+        end
+    end)
+
+    pcall(function()
+        for _, root in ipairs({workspace, Lighting, ReplicatedStorage}) do
+            for _, child in ipairs(root:GetChildren()) do
+                local lName = child.Name:lower()
+                if lName:find("weather") or lName:find("event") or lName:find("storm") or lName:find("lighting") then
+                    table.insert(env.WeatherObjects, {
+                        Path = child:GetFullName(),
+                        ClassName = child.ClassName,
+                        Attributes = child:GetAttributes(),
+                        Value = child:IsA("ValueBase") and tostring(child.Value) or nil,
+                    })
+                end
             end
         end
-    end
+    end)
 
     return env
+end
+
+-- Scans ReplicatedStorage for Modules that might contain Egg or Pet metadata (Metadata only, NO blind require)
+local function scanReplicatedStorageMetadata()
+    local moduleDumps = {}
+    local keywords = {"egg", "pet", "mutation", "weather", "config", "data", "hatch", "drop"}
+
+    pcall(function()
+        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
+            if desc:IsA("ModuleScript") then
+                local lowerName = desc.Name:lower()
+                local matches = false
+                for _, kw in ipairs(keywords) do
+                    if lowerName:find(kw) then
+                        matches = true
+                        break
+                    end
+                end
+
+                if matches then
+                    local modAttrs = {}
+                    pcall(function()
+                        for k, v in pairs(desc:GetAttributes()) do
+                            modAttrs[k] = serializeValue(v)
+                        end
+                    end)
+
+                    table.insert(moduleDumps, {
+                        FullName = desc:GetFullName(),
+                        Name = desc.Name,
+                        Attributes = modAttrs,
+                    })
+                end
+            end
+        end
+    end)
+
+    return moduleDumps
 end
 
 -- Main diagnostic scan execution
@@ -307,8 +316,8 @@ function Scanner:Run(options)
         Timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         PlaceId = game.PlaceId,
         GameJobId = game.JobId,
-        Weather = scanWeatherEnvironment(),
-        Modules = scanReplicatedStorage(),
+        Weather = {},
+        Modules = {},
         RenderedEggsSummary = {
             TotalEggs = 0,
             UniqueNames = {},
@@ -316,19 +325,27 @@ function Scanner:Run(options)
         },
         DetailedEggs = {},
         PlayerPlotEggs = {},
+        OtherEggContainers = {},
     }
 
-    -- 1. Scan workspace.RenderedEggs
+    -- STEP 1: Scan workspace.RenderedEggs (FIRST AND FOREMOST)
+    log("[Step 1/4] Scanning workspace.RenderedEggs...")
     local renderedFolder = workspace:FindFirstChild("RenderedEggs")
     if renderedFolder then
         local children = renderedFolder:GetChildren()
         report.RenderedEggsSummary.TotalEggs = #children
+        log(string.format("  -> Found %d eggs in workspace.RenderedEggs", #children))
 
         local nameCount = {}
         for _, egg in ipairs(children) do
             nameCount[egg.Name] = (nameCount[egg.Name] or 0) + 1
         end
         report.RenderedEggsSummary.UniqueNames = nameCount
+
+        -- Print unique egg names
+        for eggName, count in pairs(nameCount) do
+            log(string.format("     • %s: %d active", eggName, count))
+        end
 
         -- Store detailed inspection for:
         -- - ALL eggs marked as potentially mutated
@@ -340,12 +357,16 @@ function Scanner:Run(options)
                 if inspected.IsPotentiallyMutated then
                     report.RenderedEggsSummary.MutatedCount = report.RenderedEggsSummary.MutatedCount + 1
                     table.insert(report.DetailedEggs, inspected)
-                    log(string.format("⚡ FOUND MUTATED/SPECIAL EGG: %s (Attributes: %d, Tags: %d, Keywords: %s)",
-                        egg.Name,
-                        #inspected.Attributes,
-                        #inspected.Tags,
-                        table.concat(inspected.SuspiciousKeywords, ", ")
-                    ), true)
+                    log(string.format("⚡ [MUTATED/SPECIAL] %s", egg.Name), true)
+                    if next(inspected.Attributes) ~= nil then
+                        log(string.format("     Attributes: %s", HttpService:JSONEncode(inspected.Attributes)), true)
+                    end
+                    if #inspected.Tags > 0 then
+                        log(string.format("     Tags: %s", table.concat(inspected.Tags, ", ")), true)
+                    end
+                    if #inspected.VisualEffects > 0 then
+                        log(string.format("     Effects: %d visual effects found", #inspected.VisualEffects), true)
+                    end
                 elseif not samplesSaved[egg.Name] then
                     samplesSaved[egg.Name] = true
                     table.insert(report.DetailedEggs, inspected)
@@ -353,51 +374,82 @@ function Scanner:Run(options)
             end
         end
     else
-        log("⚠️ workspace.RenderedEggs not found!", true)
-    end
-
-    -- 2. Scan Player Base Plot Eggs
-    local plots = workspace:FindFirstChild("Plots")
-    if plots then
-        for _, plot in ipairs(plots:GetChildren()) do
-            local eggsFolder = plot:FindFirstChild("Eggs")
-            if eggsFolder and #eggsFolder:GetChildren() > 0 then
-                for _, egg in ipairs(eggsFolder:GetChildren()) do
-                    local inspected = inspectEggInstance(egg)
-                    if inspected then
-                        table.insert(report.PlayerPlotEggs, inspected)
-                    end
-                end
+        log("⚠️ workspace.RenderedEggs not found! Searching for fallback egg containers...", true)
+        for _, obj in ipairs(workspace:GetChildren()) do
+            local lower = obj.Name:lower()
+            if (lower:find("egg") or lower:find("render")) and obj:IsA("Folder") or obj:IsA("Model") then
+                table.insert(report.OtherEggContainers, obj:GetFullName())
+                log(string.format("  -> Discovered container: %s (%d items)", obj.Name, #obj:GetChildren()))
             end
         end
     end
 
-    -- 3. Print Concise Human-Readable Summary
+    -- STEP 2: Scan Player Base Plot Eggs
+    log("[Step 2/4] Scanning Player Plot Eggs (workspace.Plots)...")
+    pcall(function()
+        local plots = workspace:FindFirstChild("Plots")
+        if plots then
+            for _, plot in ipairs(plots:GetChildren()) do
+                local eggsFolder = plot:FindFirstChild("Eggs")
+                if eggsFolder and #eggsFolder:GetChildren() > 0 then
+                    for _, egg in ipairs(eggsFolder:GetChildren()) do
+                        local inspected = inspectEggInstance(egg)
+                        if inspected then
+                            inspected.PlotOwner = plot.Name
+                            table.insert(report.PlayerPlotEggs, inspected)
+                        end
+                    end
+                end
+            end
+            log(string.format("  -> Scanned %d base eggs across plots", #report.PlayerPlotEggs))
+        end
+    end)
+
+    -- STEP 3: Scan Weather & Environment
+    log("[Step 3/4] Scanning Weather & Environment...")
+    pcall(function()
+        report.Weather = scanWeatherEnvironment()
+        for k, v in pairs(report.Weather.WorkspaceAttributes) do
+            log(string.format("  workspace[%s] = %s", tostring(k), tostring(v)))
+        end
+        for k, v in pairs(report.Weather.LightingAttributes) do
+            log(string.format("  Lighting[%s] = %s", tostring(k), tostring(v)))
+        end
+    end)
+
+    -- STEP 4: Scan ReplicatedStorage Modules Metadata
+    log("[Step 4/4] Scanning ReplicatedStorage module metadata...")
+    pcall(function()
+        report.Modules = scanReplicatedStorageMetadata()
+        log(string.format("  -> Found %d relevant modules in ReplicatedStorage", #report.Modules))
+        for _, mod in ipairs(report.Modules) do
+            log(string.format("     • %s (%s)", mod.Name, mod.FullName))
+        end
+    end)
+
+    -- STEP 5: Serialize and Export
+    log("==================================================")
     log(string.format("✅ Scan Finished! Total Rendered Eggs: %d | Mutated/Special: %d",
         report.RenderedEggsSummary.TotalEggs,
         report.RenderedEggsSummary.MutatedCount
     ))
+    log("==================================================")
 
-    log("--- Weather Environment ---")
-    for k, v in pairs(report.Weather.WorkspaceAttributes) do
-        log(string.format("  workspace[%s] = %s", tostring(k), serializeValue(v)))
-    end
-    for k, v in pairs(report.Weather.LightingAttributes) do
-        log(string.format("  Lighting[%s] = %s", tostring(k), serializeValue(v)))
-    end
-
-    log("--- ReplicatedStorage Modules Found ---")
-    for _, mod in ipairs(report.Modules) do
-        log(string.format("  Module: %s (Exported Keys: %s)", mod.Name, table.concat(mod.ExportedKeys, ", ")))
-    end
-
-    -- 4. Serialize to JSON
-    local okJson, jsonString = pcall(function()
+    local jsonString = nil
+    local okJson, encoded = pcall(function()
         return HttpService:JSONEncode(report)
     end)
 
-    if okJson and jsonString then
-        -- Save to file
+    if okJson and encoded then
+        jsonString = encoded
+    else
+        -- Fallback simpler serialization
+        log("⚠️ Standard JSON encode failed, generating clean report string...", true)
+        jsonString = serializeValue(report)
+    end
+
+    if jsonString then
+        -- Save to file via UNC writefile
         if saveToFile and typeof(writefile) == "function" then
             pcall(function()
                 if typeof(makefolder) == "function" and not isfolder("PSD_Hub") then
@@ -408,17 +460,17 @@ function Scanner:Run(options)
             end)
         end
 
-        -- Copy to clipboard
+        -- Copy to clipboard via UNC setclipboard
         if copyClipboard then
             local copied = copyToClipboard(jsonString)
             if copied then
-                log("📋 Dump copied to system clipboard! You can paste it directly.")
+                log("📋 Dump copied to system clipboard! Press Ctrl+V to paste.")
+            else
+                log("⚠️ setclipboard() not supported by your executor.", true)
             end
         end
 
-        notifyUser("Egg Scanner", string.format("Scan complete! %d eggs scanned (%d mutated). Data copied to clipboard!", report.RenderedEggsSummary.TotalEggs, report.RenderedEggsSummary.MutatedCount))
-    else
-        log("❌ Failed to encode scan report to JSON.", true)
+        notifyUser("Egg Scanner", string.format("Scan complete! %d eggs scanned (%d mutated). Copied to clipboard!", report.RenderedEggsSummary.TotalEggs, report.RenderedEggsSummary.MutatedCount))
     end
 
     return report
@@ -435,21 +487,23 @@ function Scanner:StartWatcher()
     log("👀 Live Egg Mutation Watcher STARTED. Waiting for egg spawns or weather mutations...")
 
     local conn = renderedFolder.ChildAdded:Connect(function(child)
-        task.wait(0.2) -- Wait for attributes to replicate
+        task.wait(0.2)
         local inspected = inspectEggInstance(child)
         if inspected and inspected.IsPotentiallyMutated then
-            log(string.format("⚡ [LIVE DETECTED] %s spawned with special traits! Tags: %s | Attrs: %s",
-                child.Name,
-                table.concat(inspected.Tags, ", "),
-                HttpService:JSONEncode(inspected.Attributes)
-            ), true)
+            log(string.format("⚡ [LIVE DETECTED] %s spawned with special traits!", child.Name), true)
+            if next(inspected.Attributes) ~= nil then
+                log(string.format("   Attributes: %s", HttpService:JSONEncode(inspected.Attributes)), true)
+            end
+            if #inspected.Tags > 0 then
+                log(string.format("   Tags: %s", table.concat(inspected.Tags, ", ")), true)
+            end
         end
     end)
 
     local descConn = renderedFolder.DescendantAdded:Connect(function(desc)
         if desc:IsA("ParticleEmitter") or desc:IsA("Highlight") or desc:IsA("Beam") then
             local egg = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
-            log(string.format("✨ [EFFECT ADDED] Effect %s added to egg: %s", desc.Name, egg and egg.Name or "Unknown"))
+            log(string.format("✨ [EFFECT ADDED] Effect '%s' added to egg: %s", desc.Name, egg and egg.Name or "Unknown"))
         end
     end)
 
@@ -473,4 +527,3 @@ if not _G.PSD_SCANNER_NO_AUTORUN then
 end
 
 return Scanner
-
