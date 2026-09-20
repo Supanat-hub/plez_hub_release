@@ -367,7 +367,7 @@ local function showKeyUI(onSuccess)
     InputBox.Font = Enum.Font.Gotham
     InputBox.TextSize = 13
     InputBox.TextColor3 = Color3.fromRGB(240, 240, 245)
-    InputBox.PlaceholderText = "Paste access key here (e.g. aom_key)..."
+    InputBox.PlaceholderText = "Paste access key here ..."
     InputBox.PlaceholderColor3 = Color3.fromRGB(100, 105, 125)
     InputBox.ClearTextOnFocus = false
     InputBox.TextXAlignment = Enum.TextXAlignment.Left
