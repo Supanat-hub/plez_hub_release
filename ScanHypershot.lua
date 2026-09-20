@@ -1,9 +1,12 @@
 --[[
-    PSD Hub — Hypershot Ultra-Deep Diagnostic Scanner v3
+    Hypershot Ultra-Deep Diagnostic Scanner v3
     Run this script in your executor during an active match.
-    Outputs:
-    - Saved to: PSD_Hub/hypershot_deep_scan.json
-    - Copied to clipboard via setclipboard()
+    It inspects:
+    1. Every player & character (Attributes, Children, Highlights, Teams)
+    2. Exact evaluation of IsEnemy, IsAlive, IsVisible on every player
+    3. Workspace & Camera for Viewmodels, Raycast Obstructions & Map geometry
+    4. ReplicatedStorage GameInfo & Gamemode rules
+    Results are saved to PSD_Hub/hypershot_deep_scan.json and copied to clipboard.
 --]]
 
 local HttpService = game:GetService("HttpService")
@@ -17,7 +20,7 @@ local localPlayer = Players.LocalPlayer
 local camera = Workspace.CurrentCamera
 
 print("==================================================")
-print("  🔬 Starting Hypershot Ultra-Deep Diagnostic Scan v3...")
+print("  🔬 Starting Hypershot Ultra-Deep Diagnostic Scan...")
 print("==================================================")
 
 local scanData = {
@@ -34,6 +37,7 @@ local scanData = {
     CameraChildren = {},
     WorkspaceTopLevel = {},
     PlayersEvaluation = {},
+    RaycastDiagnostics = {},
 }
 
 -- 1. Scan ReplicatedStorage.GameInfo
@@ -72,6 +76,11 @@ pcall(function()
         end
     end
 end)
+
+-- Local Player Attributes
+local localTeamAttr = localPlayer:GetAttribute("Team")
+local localChar = localPlayer.Character
+local localCharTeamAttr = localChar and localChar:GetAttribute("Team")
 
 -- 4. Deep Player Scan & Realtime Targeting Evaluation
 for _, player in ipairs(Players:GetPlayers()) do
@@ -140,7 +149,7 @@ for _, player in ipairs(Players:GetPlayers()) do
         local hasEnemyHighlight = (char:FindFirstChild("EnemyHighlight") ~= nil)
         local hasPlayerOutline = (char:FindFirstChild("PlayerOutline") ~= nil)
 
-        -- Raycast test from Camera to Head
+        -- Raycast test from Camera to Head and RootPart
         local headVisible = false
         local headHitInfo = "No Raycast"
         if head and camera then
@@ -149,7 +158,7 @@ for _, player in ipairs(Players:GetPlayers()) do
             local dir = dest - origin
             local params = RaycastParams.new()
             params.FilterType = Enum.RaycastFilterType.Exclude
-            params.FilterDescendantsInstances = { camera, localPlayer.Character, Workspace:FindFirstChild("IgnoreThese") }
+            params.FilterDescendantsInstances = { camera, localChar, Workspace:FindFirstChild("IgnoreThese") }
             local hit = Workspace:Raycast(origin, dir, params)
             if not hit then
                 headVisible = true
@@ -187,6 +196,42 @@ for _, player in ipairs(Players:GetPlayers()) do
     table.insert(scanData.PlayersEvaluation, pEval)
 end
 
+-- 5. Scan Workspace.Mobs (Bots playing in the match)
+scanData.MobsEvaluation = {}
+pcall(function()
+    local mobsFolder = Workspace:FindFirstChild("Mobs")
+    if mobsFolder then
+        for _, mob in ipairs(mobsFolder:GetChildren()) do
+            if mob:IsA("Model") then
+                local humanoid = mob:FindFirstChildOfClass("Humanoid")
+                local root = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso")
+                local highlights = {}
+                for _, c in ipairs(mob:GetChildren()) do
+                    if c:IsA("Highlight") then
+                        table.insert(highlights, {
+                            Name = c.Name,
+                            FillColor = tostring(c.FillColor),
+                            OutlineColor = tostring(c.OutlineColor),
+                            Enabled = c.Enabled
+                        })
+                    end
+                end
+                table.insert(scanData.MobsEvaluation, {
+                    Name = mob.Name,
+                    Class = mob.ClassName,
+                    TeamAttr = mob:GetAttribute("Team"),
+                    AllAttributes = mob:GetAttributes(),
+                    Health = humanoid and humanoid.Health or 0,
+                    Highlights = highlights,
+                    Parent = mob.Parent and mob.Parent.Name or "nil",
+                    HasEnemyHighlight = mob:FindFirstChild("EnemyHighlight") ~= nil,
+                    HasPlayerOutline = mob:FindFirstChild("PlayerOutline") ~= nil,
+                })
+            end
+        end
+    end
+end)
+
 -- Serialize and Save
 local jsonStr = HttpService:JSONEncode(scanData)
 
@@ -199,9 +244,8 @@ pcall(function()
 end)
 
 pcall(function()
-    local fn = setclipboard or toclipboard or (syn and syn.write_clipboard) or (Clipboard and Clipboard.set)
-    if typeof(fn) == "function" then
-        fn(jsonStr)
+    if setclipboard then
+        setclipboard(jsonStr)
         print("[HypershotDeepScan] JSON successfully copied to clipboard!")
     end
 end)
@@ -209,5 +253,5 @@ end)
 print("==================================================")
 print("  ✅ HYPERSHOT ULTRA-DEEP SCAN COMPLETED!")
 print(string.format("  Players Scanned: %d", #scanData.PlayersEvaluation))
-print("  File: PSD_Hub/hypershot_deep_scan.json")
+print("  Paste the JSON or file contents to the chat!")
 print("==================================================")
