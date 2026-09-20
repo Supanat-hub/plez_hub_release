@@ -513,13 +513,27 @@ local function showKeyUI(onSuccess)
     end)
 
     PasteBtn.MouseButton1Click:Connect(function()
+        local pasted = false
         pcall(function()
-            if getclipboard then
-                InputBox.Text = getclipboard()
-                StatusLabel.Text = "Pasted from clipboard."
-                StatusLabel.TextColor3 = Color3.fromRGB(100, 220, 140)
+            local readClipboard = getclipboard or get_clipboard or (syn and syn.get_clipboard) or (Clipboard and Clipboard.get)
+            if typeof(readClipboard) == "function" then
+                local content = readClipboard()
+                if content and type(content) == "string" and #content:gsub("%s+", "") > 0 then
+                    InputBox.Text = content:gsub("^%s+", ""):gsub("%s+$", "")
+                    StatusLabel.Text = "Pasted from clipboard."
+                    StatusLabel.TextColor3 = Color3.fromRGB(100, 220, 140)
+                    pasted = true
+                end
             end
         end)
+
+        if not pasted then
+            StatusLabel.Text = "Clipboard read not supported. Tap box to paste."
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 180, 80)
+            pcall(function()
+                InputBox:CaptureFocus()
+            end)
+        end
     end)
 
     VerifyBtn.MouseButton1Click:Connect(function()
