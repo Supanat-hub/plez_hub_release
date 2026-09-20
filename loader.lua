@@ -540,10 +540,13 @@ local function showKeyUI(onSuccess)
                 StatusLabel.Text = "Key Verified! Loading PSD Hub..."
                 StatusLabel.TextColor3 = Color3.fromRGB(100, 220, 140)
                 safeWriteFile(CACHE_KEY_FILE, key)
+                data.key = key
+                _G.PSD_Auth = data
+                if env then env.PSD_Auth = data end
 
                 task.wait(0.5)
                 ScreenGui:Destroy()
-                onSuccess()
+                onSuccess(data)
             else
                 StatusLabel.Text = data.message or "Invalid or expired key."
                 StatusLabel.TextColor3 = Color3.fromRGB(255, 90, 90)
@@ -592,26 +595,31 @@ local function execute()
         end
     end)
 
-    -- Step 1: Check cached key in background
-    local cachedKey = safeReadFile(CACHE_KEY_FILE)
-    if cachedKey and #cachedKey >= 3 then
-        print("[PSD Hub] Checking saved access key...")
-        verifyKey(cachedKey, function(ok, data)
-            if ok then
-                print("[PSD Hub] Key verified! Starting hub...")
-                loadAndExecuteMainHub()
+    -- Step 1: Check cached key or whitelist status
+    local cachedKey = safeReadFile(CACHE_KEY_FILE) or ""
+    print("[PSD Hub] Checking authentication status...")
+    verifyKey(cachedKey, function(ok, data)
+        if ok then
+            data.key = (data.key and #data.key > 0 and data.key) or cachedKey
+            _G.PSD_Auth = data
+            if env then env.PSD_Auth = data end
+            if data.whitelisted then
+                print("[PSD Hub] Whitelist active (" .. tostring(data.role or "Member") .. ")! Bypassing key prompt...")
             else
-                print("[PSD Hub] Saved key expired or invalid. Prompting user...")
-                showKeyUI(function()
-                    loadAndExecuteMainHub()
-                end)
+                print("[PSD Hub] Key verified! Starting hub...")
             end
-        end)
-    else
-        showKeyUI(function()
             loadAndExecuteMainHub()
-        end)
-    end
+        else
+            print("[PSD Hub] Key required. Prompting user...")
+            showKeyUI(function(authData)
+                if authData then
+                    _G.PSD_Auth = authData
+                    if env then env.PSD_Auth = authData end
+                end
+                loadAndExecuteMainHub()
+            end)
+        end
+    end)
 end
 
 execute()
