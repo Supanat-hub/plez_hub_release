@@ -1,10 +1,6 @@
 --[[
-    DumpNamesAndStages.lua
-    Dumps:
-    1. ReplicatedStorage Language / Localization / Config for Ore names & Mob names
-    2. Exact Stage positions from Workspace / ReplicatedStorage
-    3. Ore model names and displayed texts
---]]
+    DumpNamesAndStages.lua (Safe Non-Cyclic Serializer)
+]]
 
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -17,15 +13,51 @@ local result = {
     LanguageModules = {},
 }
 
--- 1. Search for Language / Translation / Name configs in ReplicatedStorage
+-- Safe table copy that strips circular references and non-primitives
+local function safeDeepCopy(tbl, maxDepth, seen)
+    maxDepth = maxDepth or 2
+    seen = seen or {}
+    if maxDepth <= 0 then return "<depth>" end
+    if type(tbl) ~= "table" then
+        if type(tbl) == "string" or type(tbl) == "number" or type(tbl) == "boolean" then
+            return tbl
+        else
+            return tostring(tbl)
+        end
+    end
+    if seen[tbl] then return "<cyclic>" end
+    seen[tbl] = true
+
+    local copy = {}
+    local count = 0
+    for k, v in pairs(tbl) do
+        count = count + 1
+        if count > 60 then
+            copy["_more"] = "..."
+            break
+        end
+        local sk = tostring(k)
+        if type(v) == "table" then
+            copy[sk] = safeDeepCopy(v, maxDepth - 1, seen)
+        elseif type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
+            copy[sk] = v
+        else
+            copy[sk] = tostring(v)
+        end
+    end
+    seen[tbl] = nil
+    return copy
+end
+
+-- 1. Search Language / Localization
 pcall(function()
     for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
         if desc:IsA("ModuleScript") then
             local n = desc.Name:lower()
-            if n:find("lang") or n:find("text") or n:find("name") or n:find("i18n") or n:find("locale") or n:find("string") then
+            if n:find("lang") or n:find("text") or n:find("i18n") or n:find("locale") or n:find("string") then
                 local ok, data = pcall(function() return require(desc) end)
                 if ok and type(data) == "table" then
-                    result.LanguageModules[desc:GetFullName()] = data
+                    result.LanguageModules[desc:GetFullName()] = safeDeepCopy(data, 2)
                 end
             end
         end
@@ -34,11 +66,13 @@ end)
 
 -- 2. Inspect ReplicatedStorage.Config.Ore
 pcall(function()
-    for _, desc in ipairs(ReplicatedStorage.Config.Ore:GetDescendants()) do
-        if desc:IsA("ModuleScript") then
-            local ok, data = pcall(function() return require(desc) end)
-            if ok and type(data) == "table" then
-                result.OreNames[desc:GetFullName()] = data
+    if ReplicatedStorage:FindFirstChild("Config") and ReplicatedStorage.Config:FindFirstChild("Ore") then
+        for _, desc in ipairs(ReplicatedStorage.Config.Ore:GetDescendants()) do
+            if desc:IsA("ModuleScript") then
+                local ok, data = pcall(function() return require(desc) end)
+                if ok and type(data) == "table" then
+                    result.OreNames[desc.Name] = safeDeepCopy(data, 2)
+                end
             end
         end
     end
@@ -46,19 +80,20 @@ end)
 
 -- 3. Inspect ReplicatedStorage.Config.Enemy
 pcall(function()
-    for _, desc in ipairs(ReplicatedStorage.Config.Enemy:GetDescendants()) do
-        if desc:IsA("ModuleScript") then
-            local ok, data = pcall(function() return require(desc) end)
-            if ok and type(data) == "table" then
-                result.MobNames[desc:GetFullName()] = data
+    if ReplicatedStorage:FindFirstChild("Config") and ReplicatedStorage.Config:FindFirstChild("Enemy") then
+        for _, desc in ipairs(ReplicatedStorage.Config.Enemy:GetDescendants()) do
+            if desc:IsA("ModuleScript") then
+                local ok, data = pcall(function() return require(desc) end)
+                if ok and type(data) == "table" then
+                    result.MobNames[desc.Name] = safeDeepCopy(data, 2)
+                end
             end
         end
     end
 end)
 
--- 4. Find all Stage parts / models in Workspace to get 100% exact coordinates for all 27 stages
+-- 4. Find all Stage parts in Workspace
 pcall(function()
-    -- Look for models or folders with numbers 1 to 27 or "Stage"
     for _, obj in ipairs(Workspace:GetDescendants()) do
         local n = obj.Name
         if obj:IsA("BasePart") or obj:IsA("Model") then
@@ -66,18 +101,17 @@ pcall(function()
             if num then
                 local stageNum = tonumber(num)
                 local pos = obj:IsA("BasePart") and obj.Position or (obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetPivot().Position)
-                result.StagePositions[stageNum] = {
+                result.StagePositions[tostring(stageNum)] = {
                     Name = n,
                     Position = tostring(pos),
                     Class = obj.ClassName,
-                    Parent = obj.Parent and obj.Parent.Name,
                 }
             end
         end
     end
 end)
 
--- 5. Scan current EnemyFolder to map each active enemy's position to its real stage
+-- 5. Scan active enemies
 pcall(function()
     local ef = Workspace:FindFirstChild("EnemyFolder")
     if ef then
@@ -87,7 +121,6 @@ pcall(function()
             table.insert(result.CurrentEnemiesInFolder, {
                 Name = enemy.Name,
                 EnemyID = enemy:GetAttribute("EnemyID"),
-                Attributes = enemy:GetAttributes(),
                 Position = root and tostring(root.Position),
             })
         end
@@ -101,8 +134,6 @@ pcall(function()
 end)
 
 print("==================================================")
-print("  ✅ DumpNamesAndStages Completed!")
-print("  Stage Positions Found: " .. tostring(#result.StagePositions))
-print("  Ore Configs Found: " .. tostring(#result.OreNames))
+print("  ✅ Dump Completed Successfully!")
 print("  Copied to Clipboard!")
 print("==================================================")
